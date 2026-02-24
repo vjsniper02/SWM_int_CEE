@@ -1,0 +1,79 @@
+{
+  "Comment": "CEE State Machine",
+  "StartAt": "CEERequestReceiver",
+  "States": {
+    "CEERequestReceiver": {
+      "Type": "Task",
+      "Resource": "${CEERequestReceiverFunctionArn}",
+      "Retry": [],
+      "ResultPath": "$",
+      "Next": "CheckCEERequestReceiverOutput"
+    },
+    "CheckCEERequestReceiverOutput": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.payload.type",
+          "StringMatches": "Holdings",
+          "Next": "Parallel"
+        },
+        {
+          "Variable": "$.payload.type",
+          "StringMatches": "Ebookings",
+          "Next": "Email Client"
+        }
+      ]
+    },
+    "Email Client": {
+      "Type": "Task",
+      "Resource": "${CEEEmailFunctionArn}",
+      "Retry": [],
+      "ResultPath": "$.lambda3Output",
+      "End": true
+    },
+    "Parallel": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "EmailClient",
+          "States": {
+            "EmailClient": {
+              "Type": "Task",
+              "Resource": "${CEEEmailFunctionArn}",
+              "Retry": [],
+              "ResultPath": "$.lambda3Output",
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "CheckCondition",
+          "States": {
+            "CheckCondition": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.payload.sftp",
+                  "BooleanEquals": true,
+                  "Next": "SFTPClient"
+                }
+              ],
+              "Default": "NoSFTP"
+            },
+            "SFTPClient": {
+              "Type": "Task",
+              "Resource": "${CEESftpFunctionArn}",
+              "Retry": [],
+              "ResultPath": "$.lambda2Output",
+              "End": true
+            },
+            "NoSFTP": {
+              "Type": "Succeed"
+            }
+          }
+        }
+      ],
+      "End": true
+    }
+  }
+}

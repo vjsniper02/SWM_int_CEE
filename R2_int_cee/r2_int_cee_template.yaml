@@ -1,0 +1,376 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  r2-int-cee
+
+  Sample SAM Template for r2-cee
+Globals:
+  Function:
+    Tracing: Active
+    Timeout: 900
+    Environment:
+      Variables:
+        SEIL_AWS_REGION: "ap-southeast-2"
+
+Parameters:
+  EnvPrefix:
+    Type: String
+    Description: Environment Name as Prefix
+    Default: MYENVIRONMENT
+
+Resources:
+  CEEStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub "${EnvPrefix}-cee"
+      DefinitionUri: statemachine/cee.asl.json
+      DefinitionSubstitutions:
+        CEERequestReceiverFunctionArn: !GetAtt CEERequestReceiverFunction.Arn
+        CEESftpFunctionArn: !GetAtt CEESftpFunction.Arn
+        CEEEmailFunctionArn: !GetAtt CEEEmailFunction.Arn
+
+      Policies:
+      # Find out more about SAM policy templates: https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-policy-templates.html
+      - LambdaInvokePolicy:
+          FunctionName: !Ref CEESftpFunction
+      - LambdaInvokePolicy:
+          FunctionName: !Ref CEERequestReceiverFunction
+      - LambdaInvokePolicy:
+          FunctionName: !Ref CEEEmailFunction
+
+  SESConfigurationSet:
+    Type: "AWS::SES::ConfigurationSet"
+    Properties:
+      Name: !Sub "seil-${EnvPrefix}-CEEConfigurationSet"
+
+  SESConfigurationSetEventDestination:
+    Type: "AWS::SES::ConfigurationSetEventDestination"
+    Properties:
+      ConfigurationSetName: !Ref SESConfigurationSet
+      EventDestination:
+        Name: !Sub "seil-${EnvPrefix}-BounceNotification"
+        Enabled: true
+        MatchingEventTypes:
+        - "bounce"
+        - "delivery"
+        SnsDestination:
+          TopicARN: !Ref EmailNotificationSNS
+
+  EmailNotificationSNS:
+    Type: AWS::SNS::Topic
+
+  BounceReporterLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: functions.bounce_reporter.app.lambda_handler
+      Runtime: python3.13
+      Environment:
+        Variables:
+          LOG_GROUP_NAME: !Ref CEECloudWatchLogGroup
+          LOG_STREAM_NAME: !Ref CEENotificationLogStream
+          LOG_STREAM_NAME_MESSAGE_ID: !Ref CEEEmailMessageIdLogStream
+      Architectures:
+      - x86_64
+      Layers:
+      - !Sub "{{resolve:ssm:/${EnvPrefix}/lambda-arn/common}}"
+      Policies:
+      - Version: "2012-10-17"
+        Statement:
+        - Effect: "Allow"
+          Action:
+          - "logs:CreateLogGroup"
+          - "logs:CreateLogStream"
+          - "logs:PutLogEvents"
+          - "logs:GetLogEvents"
+          - "logs:FilterLogEvents"
+          - "logs:DescribeLogStreams"
+          Resource: "*"
+      Events:
+        SESBounceNotification:
+          Type: "SNS"
+          Properties:
+            Topic: !Ref EmailNotificationSNS
+
+  CEECloudWatchLogGroup:
+    Type: "AWS::Logs::LogGroup"
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${EnvPrefix}/CEESESNotificationLogHandler"
+
+  CEENotificationLogStream:
+    Type: "AWS::Logs::LogStream"
+    Properties:
+      LogGroupName: !Ref CEECloudWatchLogGroup
+      LogStreamName: !Sub "${EnvPrefix}_cee_notification_stream"
+
+  CEEEmailMessageIdLogStream:
+    Type: "AWS::Logs::LogStream"
+    Properties:
+      LogGroupName: !Ref CEECloudWatchLogGroup
+      LogStreamName: !Sub "${EnvPrefix}_cee_email_message_id_stream"
+
+  BounceReporterLambdaPermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !Ref BounceReporterLambda
+      Principal: sns.amazonaws.com
+
+  CEERequestReceiverFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: functions.request_receiver.app.lambda_handler
+      Runtime: python3.13
+      Architectures:
+      - x86_64
+      Layers:
+      - !Sub "{{resolve:ssm:/${EnvPrefix}/lambda-arn/common}}"
+      Environment:
+        Variables:
+          LOG_GROUP_NAME: !Ref CEECloudWatchLogGroup
+          LOG_STREAM_NAME: !Ref CEENotificationLogStream
+          CEE_SFTP_FUNCTION: !GetAtt CEESftpFunction.Arn
+          CEE_EMAIL_FUNCTION: !GetAtt CEEEmailFunction.Arn
+          SF_EMAIL_TEMPLATE_NAME: !Sub "/${EnvPrefix}/cee/sf/templatedevelopername"
+          EMAIL_DOMAIN: !Sub "/${EnvPrefix}/cee/email_domain"
+          ARN_SF_ADAPTOR_SERVICE: !GetAtt CEESalesforceAdaptorFunction.Arn
+
+      Policies:
+      - Version: "2012-10-17"
+        Statement:
+        - Effect: "Allow"
+          Action:
+          - "logs:CreateLogGroup"
+          - "logs:CreateLogStream"
+          - "logs:PutLogEvents"
+          - "logs:GetLogEvents"
+          - "logs:DescribeLogStreams"
+          Resource: "*"
+      - Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Action:
+          - lambda:InvokeFunction
+          Resource: [ !GetAtt CEESftpFunction.Arn, !GetAtt CEEEmailFunction.Arn, !GetAtt CEESalesforceAdaptorFunction.Arn ]
+      - Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Action:
+          - ssm:GetParameter
+          - ssm:GetParameters
+          - ssm:DescribeParameters
+          Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/*"
+
+  CEESftpFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: functions.sftp_client.app.lambda_handler
+      Runtime: python3.13
+      Architectures:
+      - x86_64
+      Layers:
+      - !Sub "{{resolve:ssm:/${EnvPrefix}/lambda-arn/common}}"
+      Environment:
+        Variables:
+          LOG_GROUP_NAME: !Ref CEECloudWatchLogGroup
+          LOG_STREAM_NAME: !Ref CEENotificationLogStream
+          HOLDINGS_SFTP_SECRET_NAME: !Sub "${EnvPrefix}/SEIL_CEE_FTP_Secrets"
+      Policies:
+      - Version: "2012-10-17"
+        Statement:
+        - Effect: "Allow"
+          Action:
+          - "logs:CreateLogGroup"
+          - "logs:CreateLogStream"
+          - "logs:PutLogEvents"
+          - "logs:GetLogEvents"
+          - "logs:DescribeLogStreams"
+          Resource: "*"
+      - Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Action:
+          - secretsmanager:GetResourcePolicy
+          - secretsmanager:GetSecretValue
+          - secretsmanager:DescribeSecret
+          - secretsmanager:ListSecretVersionIds
+          Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${EnvPrefix}/*"
+      - Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Action: s3:GetObject*
+          Resource: !Sub "arn:aws:s3:::seil-${EnvPrefix}-holdings-file-zip/*"
+
+  CEESalesforceAdaptorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/salesforce_adaptor/
+      Handler: salesforce_adaptor.lambda_handler
+      Runtime: python3.13
+      Timeout: 900
+      Architectures:
+      - x86_64
+      Environment:
+        Variables:
+          SF_API_PRIVATE_KEY: !Sub "${EnvPrefix}/sf/jwt"
+      Policies:
+      - Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Action:
+          - secretsmanager:GetResourcePolicy
+          - secretsmanager:GetSecretValue
+          - secretsmanager:DescribeSecret
+          - secretsmanager:ListSecretVersionIds
+          Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:*"
+
+  CEEEmailFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: functions.email_client.app.lambda_handler
+      Runtime: python3.13
+      MemorySize: 512
+      Architectures:
+      - x86_64
+      Layers:
+      - !Sub "{{resolve:ssm:/${EnvPrefix}/lambda-arn/common}}"
+      Environment:
+        Variables:
+          LOG_GROUP_NAME: !Ref CEECloudWatchLogGroup
+          LOG_STREAM_NAME: !Ref CEENotificationLogStream
+          LOG_STREAM_NAME_MESSAGE_ID: !Ref CEEEmailMessageIdLogStream
+          HOLDINGS_FILE_BUCKET: !Sub "${EnvPrefix}-holdings-file-zip"
+          SES_CONFIGURATION_SET: !Ref SESConfigurationSet
+      Policies:
+      - Version: "2012-10-17"
+        Statement:
+        - Effect: "Allow"
+          Action:
+          - "logs:CreateLogGroup"
+          - "logs:CreateLogStream"
+          - "logs:PutLogEvents"
+          - "logs:GetLogEvents"
+          - "logs:DescribeLogStreams"
+          Resource: "*"
+      - Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Action: s3:*
+          Resource:
+          - !Sub "arn:aws:s3:::seil-${EnvPrefix}-ebookings-temp-file"
+          - !Sub "arn:aws:s3:::seil-${EnvPrefix}-ebookings-temp-file/*"
+        - Effect: Allow
+          Action: s3:*
+          Resource: !Sub "arn:aws:s3:::seil-${EnvPrefix}-holdings-file-zip/*"
+      - Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Action:
+          - ses:SendEmail
+          - ses:SendRawEmail
+          Resource: "*"
+      - Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Action:
+          - lambda:InvokeFunction
+          Resource: !GetAtt CEESalesforceAdaptorFunction.Arn
+      - Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Action:
+          - ssm:GetParameter
+          - ssm:GetParameters
+          - ssm:DescribeParameters
+          Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/*"
+
+  ReportGeneratorLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/delivery_report_generator/
+      Handler: app.lambda_handler
+      Runtime: python3.13
+      Description: A function that is invoked by a CloudWatch Event.
+      Events:
+        CEEReportEvent:
+          Type: ScheduleV2
+          Properties:
+            # This event runs every day at 10:00 PM UTC / 8:00 AM AEST            
+            Name: !Sub "${EnvPrefix}-cee-report-generator"
+            Description: CEE Report Scheduler
+            ScheduleExpression: "cron(0 8 * * ? *)"
+            ScheduleExpressionTimezone: "Australia/Sydney"
+            State: ENABLED
+      Architectures:
+      - x86_64
+      Environment:
+        Variables:
+          LOG_GROUP_NAME: !Ref CEECloudWatchLogGroup
+          LOG_STREAM_NAME: !Ref CEENotificationLogStream
+          HOLDINGS_REPORT_EMAIL: !Sub "/${EnvPrefix}/cee/holdings_email"
+          EMAIL_DOMAIN: !Sub "/${EnvPrefix}/cee/email_domain"
+          HOLDINGS_FILE_IN_BUCKET: !Sub "seil-${EnvPrefix}-holdings-file"
+      Policies:
+      - Statement:
+        - Effect: "Allow"
+          Action:
+          - "logs:CreateLogGroup"
+          - "logs:CreateLogStream"
+          - "logs:PutLogEvents"
+          - "logs:GetLogEvents"
+          Resource: "*"
+      - Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Action: s3:*
+          Resource:
+          - !Sub "arn:aws:s3:::seil-${EnvPrefix}-holdings-file"
+          - !Sub "arn:aws:s3:::seil-${EnvPrefix}-holdings-file/*"
+      - Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Action:
+          - ses:SendEmail
+          - ses:SendRawEmail
+          Resource: "*"
+      - Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Action:
+          - secretsmanager:GetResourcePolicy
+          - secretsmanager:GetSecretValue
+          - secretsmanager:DescribeSecret
+          - secretsmanager:ListSecretVersionIds
+          Resource: "arn:aws:secretsmanager:ap-southeast-2:333875979924:secret:*"
+      - Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Action:
+          - ssm:GetParameter
+          - ssm:GetParameters
+          - ssm:DescribeParameters
+          Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/*"
+
+  ApplicationResourceGroup:
+    Type: AWS::ResourceGroups::Group
+    Properties:
+      Name:
+        Fn::Join:
+        - ""
+        - - ApplicationInsights-SAM-
+          - Ref: AWS::StackName
+      ResourceQuery:
+        Type: CLOUDFORMATION_STACK_1_0
+  ApplicationInsightsMonitoring:
+    Type: AWS::ApplicationInsights::Application
+    Properties:
+      ResourceGroupName:
+        Fn::Join:
+        - ""
+        - - ApplicationInsights-SAM-
+          - Ref: AWS::StackName
+      AutoConfigurationEnabled: "true"
+    DependsOn: ApplicationResourceGroup
