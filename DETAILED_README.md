@@ -26,7 +26,7 @@
 
 ### What This Project Does
 
-**R2 Integration CEE** (Customer Experience Engine) is a serverless AWS application that orchestrates smart email delivery and file transfers for SWM (Shared Wealth Management) agency workflows. It:
+**R2 Integration CEE** (Customer Experience Engine) is a serverless AWS application that orchestrates smart email delivery and file transfers for SWM (Seven West Media) agency workflows. It:
 
 - **Receives requests** for email notifications with file attachments
 - **Queries Salesforce** for customer communication preferences and metadata
